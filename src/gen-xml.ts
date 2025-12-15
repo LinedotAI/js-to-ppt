@@ -43,6 +43,88 @@ import {
 	valToPts,
 } from './gen-utils'
 
+/**
+ * Calculate font scale for text shrink-to-fit functionality
+ * PowerPoint requires explicit fontScale value for immediate shrinking
+ * @param {ISlideObject} slideObject - slide object with text and dimensions
+ * @return {number} fontScale value (percentage * 1000, e.g., 85000 = 85%)
+ */
+function calculateFontScale(slideObject: ISlideObject): number {
+	// Get text content and font size
+	let textContent = ''
+	let fontSize = 18 // PowerPoint default font size in points
+
+	if (Array.isArray(slideObject.text)) {
+		slideObject.text.forEach(textItem => {
+			if (typeof textItem === 'string') {
+				textContent += textItem
+			} else if (textItem.text) {
+				textContent += textItem.text
+				if (textItem.options?.fontSize) {
+					fontSize = textItem.options.fontSize
+				}
+			}
+		})
+	} else if (typeof slideObject.text === 'string') {
+		textContent = slideObject.text
+	}
+
+	// Get font size from main options if set
+	if (slideObject.options?.fontSize) {
+		fontSize = slideObject.options.fontSize
+	}
+
+	// Get box dimensions in EMU (slideObject dimensions are already in EMU after processing)
+	// Note: w and h could be in inches (number) or percentage (string)
+	const boxWidth = typeof slideObject.options?.w === 'number' ? slideObject.options.w : 0
+	const boxHeight = typeof slideObject.options?.h === 'number' ? slideObject.options.h : 0
+
+	// If we don't have enough info, return a reasonable default (75%)
+	if (!textContent || boxWidth === 0 || boxHeight === 0) {
+		return 75000
+	}
+
+	// Convert to points if dimensions are in inches (1 inch = 72 points)
+	// Note: At this point, w/h are still in inches before EMU conversion
+	const boxWidthPts = boxWidth * 72
+	const boxHeightPts = boxHeight * 72
+
+	// Account for default margins (~0.1 inch on each side = ~7pt each)
+	const marginPts = 14 // ~7pt * 2 sides
+	const usableWidth = Math.max(boxWidthPts - marginPts, 10)
+	const usableHeight = Math.max(boxHeightPts - marginPts, 10)
+
+	// Estimate text dimensions
+	// Average character width is roughly 0.5-0.6 of font size for most fonts
+	const avgCharWidth = fontSize * 0.55
+	const lineHeight = fontSize * 1.2 // Typical line height is 120% of font size
+
+	// Calculate how many characters fit per line
+	const charsPerLine = Math.max(Math.floor(usableWidth / avgCharWidth), 1)
+
+	// Calculate lines needed (accounting for word wrap)
+	const totalChars = textContent.length
+	const linesNeeded = Math.ceil(totalChars / charsPerLine)
+
+	// Calculate height needed for all lines
+	const heightNeeded = linesNeeded * lineHeight
+
+	// If text fits, use a moderate scale to still trigger shrink mode
+	if (heightNeeded <= usableHeight) {
+		return 95000 // 95% - text fits but we set slightly less to enable shrink mode
+	}
+
+	// Calculate scale needed to fit
+	const scaleFactor = usableHeight / heightNeeded
+
+	// Convert to OOXML format (percentage * 1000) and clamp between 25% and 100%
+	// We use Math.sqrt to be less aggressive (text width also shrinks when font shrinks)
+	const adjustedScale = Math.sqrt(scaleFactor)
+	const fontScale = Math.max(25000, Math.min(100000, Math.round(adjustedScale * 100000)))
+
+	return fontScale
+}
+
 const ImageSizingXml = {
 	cover: function (imgSize: { w: number, h: number }, boxDim: { w: number, h: number, x: number, y: number }) {
 		const imgRatio = imgSize.h / imgSize.w
@@ -419,7 +501,9 @@ function slideObjectToXml (slide: PresSlide | SlideLayout): string {
 				}
 				// </Hyperlink>
 				strSlideXml += '</p:cNvPr>'
-				strSlideXml += '<p:cNvSpPr' + (slideItemObj.options?.isTextBox ? ' txBox="1"/>' : '/>')
+				// NOTE: txBox="1" indicates this is a text box, which helps PowerPoint apply text-specific features
+				const needsTxBox = slideItemObj.options?.isTextBox || slideItemObj.options?.fit === 'shrink' || slideItemObj.options?.shrinkText
+				strSlideXml += '<p:cNvSpPr' + (needsTxBox ? ' txBox="1"/>' : '/>')
 				strSlideXml += `<p:nvPr>${slideItemObj._type === 'placeholder' ? genXmlPlaceholder(slideItemObj) : genXmlPlaceholder(placeholderObj)}</p:nvPr>`
 				strSlideXml += '</p:nvSpPr><p:spPr>'
 				strSlideXml += `<a:xfrm${locationAttr}>`
@@ -1077,7 +1161,9 @@ function genXmlBodyProperties (slideObject: ISlideObject | TableCell): string {
 		// PPT-2019 EX: <a:bodyPr wrap="square" lIns="1270" tIns="1270" rIns="1270" bIns="1270" rtlCol="0" anchor="ctr"/>
 
 		// A: Enable or disable textwrapping none or square
-		bodyProperties += slideObject.options._bodyProp.wrap ? ' wrap="square"' : ' wrap="none"'
+		// NOTE: wrap="square" is REQUIRED for normAutofit (shrink) to work
+		const needsWrapSquare = slideObject.options.fit === 'shrink' || slideObject.options.shrinkText
+		bodyProperties += (slideObject.options._bodyProp.wrap || needsWrapSquare) ? ' wrap="square"' : ' wrap="none"'
 
 		// B: Textbox margins [padding]
 		if (slideObject.options._bodyProp.lIns || slideObject.options._bodyProp.lIns === 0) bodyProperties += ` lIns="${slideObject.options._bodyProp.lIns}"`
@@ -1103,14 +1189,20 @@ function genXmlBodyProperties (slideObject: ISlideObject | TableCell): string {
 		if (slideObject.options.fit) {
 			// NOTE: Use of '<a:noAutofit/>' instead of '' causes issues in PPT-2013!
 			if (slideObject.options.fit === 'none') bodyProperties += ''
-			// NOTE: Shrink does not work automatically - PowerPoint calculates the `fontScale` value dynamically upon resize
-			// else if (slideObject.options.fit === 'shrink') bodyProperties += '<a:normAutofit fontScale="85000" lnSpcReduction="20000"/>' // MS-PPT > Format shape > Text Options: "Shrink text on overflow"
-			else if (slideObject.options.fit === 'shrink') bodyProperties += '<a:normAutofit/>'
-			else if (slideObject.options.fit === 'resize') bodyProperties += '<a:spAutoFit/>'
+			else if (slideObject.options.fit === 'shrink') {
+				// PowerPoint requires explicit fontScale for immediate shrinking (without user interaction)
+				// Without fontScale, PowerPoint defaults to 100% (no shrink) until user edits the shape
+				const fontScale = calculateFontScale(slideObject as ISlideObject)
+				const lnSpcReduction = 10000 // 10% line spacing reduction
+				bodyProperties += `<a:normAutofit fontScale="${fontScale}" lnSpcReduction="${lnSpcReduction}"/>`
+			} else if (slideObject.options.fit === 'resize') bodyProperties += '<a:spAutoFit/>'
 		}
 		//
 		// DEPRECATED: below (@deprecated v3.3.0)
-		if (slideObject.options.shrinkText) bodyProperties += '<a:normAutofit/>' // MS-PPT > Format shape > Text Options: "Shrink text on overflow"
+		if (slideObject.options.shrinkText) {
+			const fontScale = calculateFontScale(slideObject as ISlideObject)
+			bodyProperties += `<a:normAutofit fontScale="${fontScale}" lnSpcReduction="10000"/>`
+		}
 		/* DEPRECATED: below (@deprecated v3.3.0)
 		 * MS-PPT > Format shape > Text Options: "Resize shape to fit text" [spAutoFit]
 		 * NOTE: Use of '<a:noAutofit/>' in lieu of '' below causes issues in PPT-2013
