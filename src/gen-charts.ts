@@ -959,7 +959,8 @@ function makeChartType (chartType: CHART_NAME, data: IOptsChartData[], opts: ICh
 						obj.labels[0].forEach((label, idx) => (strXml += `<c:pt idx="${idx}"><c:v>${encodeXmlEntities(label)}</c:v></c:pt>`))
 						strXml += '    </c:numCache>'
 						strXml += '  </c:numRef>'
-					} else {
+					} else if (obj.labels.length > 1) {
+						// Multi-level labels: use multiLvlStrRef
 						strXml += '  <c:multiLvlStrRef>'
 						strXml += `    <c:f>Sheet1!$A$2:$${getExcelColName(obj.labels.length)}$${obj.labels[0].length + 1}</c:f>`
 						strXml += '    <c:multiLvlStrCache>'
@@ -971,6 +972,15 @@ function makeChartType (chartType: CHART_NAME, data: IOptsChartData[], opts: ICh
 						})
 						strXml += '    </c:multiLvlStrCache>'
 						strXml += '  </c:multiLvlStrRef>'
+					} else {
+						// Single-level labels: use strRef (better compatibility with Keynote)
+						strXml += '  <c:strRef>'
+						strXml += `    <c:f>Sheet1!$A$2:$A$${obj.labels[0].length + 1}</c:f>`
+						strXml += '    <c:strCache>'
+						strXml += `      <c:ptCount val="${obj.labels[0].length}"/>`
+						obj.labels[0].forEach((label, idx) => (strXml += `<c:pt idx="${idx}"><c:v>${encodeXmlEntities(label)}</c:v></c:pt>`))
+						strXml += '    </c:strCache>'
+						strXml += '  </c:strRef>'
 					}
 					strXml += '</c:cat>'
 				}
@@ -1034,7 +1044,10 @@ function makeChartType (chartType: CHART_NAME, data: IOptsChartData[], opts: ICh
 			}
 
 			// 5: Add axisId (NOTE: order matters! (category comes first))
-			strXml += `<c:axId val="${catAxisId}"/><c:axId val="${valAxisId}"/><c:axId val="${AXIS_ID_SERIES_PRIMARY}"/>`
+			strXml += `<c:axId val="${catAxisId}"/><c:axId val="${valAxisId}"/>`
+			if (chartType === CHART_TYPE.BAR3D) {
+				strXml += `<c:axId val="${AXIS_ID_SERIES_PRIMARY}"/>`
+			}
 
 			// 6: Close Chart tag
 			strXml += `</c:${chartType}Chart>`
