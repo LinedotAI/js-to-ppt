@@ -29,7 +29,8 @@
 		"ship": "gulp ship",
 		"defs": "gulp reactTestDefs",
 		"watch": "rollup -cw",
-		"dev": "node dev.js"
+		"dev": "node dev.js",
+		"release": "gulp ship"
 	},
 	"browser": {
 		"express": false,

@@ -1,4 +1,4 @@
-/* PptxGenJS 4.0.1 @ 2025-06-25T23:35:35.098Z */
+/* PptxGenJS 1.0.3 @ 2025-12-16T06:04:54.221Z */
 import JSZip from 'jszip';
 
 /******************************************************************************
@@ -3074,7 +3074,11 @@ function createExcelWorksheet(chartObject, zip) {
                     });
                 }
                 else {
-                    strTableXml += `<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Table1" displayName="Table1" ref="A1:${getExcelColName(data.length + data[0].labels.length)}${data[0].labels[0].length + 1}'" totalsRowShown="0">`;
+                    strTableXml +=
+                        '<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Table1" displayName="Table1" ref="A1:' +
+                            getExcelColName(data.length + data[0].labels.length) +
+                            (data[0].labels[0].length + 1) +
+                            '" totalsRowShown="0">';
                     strTableXml += `<tableColumns count="${data.length + data[0].labels.length}">`;
                     data[0].labels.forEach((_labelsGroup, idx) => {
                         strTableXml += `<tableColumn id="${idx + 1}" name="Column${idx + 1}"/>`;
@@ -3768,7 +3772,8 @@ function makeChartType(chartType, data, opts, valAxisId, catAxisId, isMultiTypeC
                         strXml += '    </c:numCache>';
                         strXml += '  </c:numRef>';
                     }
-                    else {
+                    else if (obj.labels.length > 1) {
+                        // Multi-level labels: use multiLvlStrRef
                         strXml += '  <c:multiLvlStrRef>';
                         strXml += `    <c:f>Sheet1!$A$2:$${getExcelColName(obj.labels.length)}$${obj.labels[0].length + 1}</c:f>`;
                         strXml += '    <c:multiLvlStrCache>';
@@ -3780,6 +3785,16 @@ function makeChartType(chartType, data, opts, valAxisId, catAxisId, isMultiTypeC
                         });
                         strXml += '    </c:multiLvlStrCache>';
                         strXml += '  </c:multiLvlStrRef>';
+                    }
+                    else {
+                        // Single-level labels: use strRef (better compatibility with Keynote)
+                        strXml += '  <c:strRef>';
+                        strXml += `    <c:f>Sheet1!$A$2:$A$${obj.labels[0].length + 1}</c:f>`;
+                        strXml += '    <c:strCache>';
+                        strXml += `      <c:ptCount val="${obj.labels[0].length}"/>`;
+                        obj.labels[0].forEach((label, idx) => (strXml += `<c:pt idx="${idx}"><c:v>${encodeXmlEntities(label)}</c:v></c:pt>`));
+                        strXml += '    </c:strCache>';
+                        strXml += '  </c:strRef>';
                     }
                     strXml += '</c:cat>';
                 }
@@ -3841,7 +3856,10 @@ function makeChartType(chartType, data, opts, valAxisId, catAxisId, isMultiTypeC
                 strXml += '  <c:marker val="1"/>';
             }
             // 5: Add axisId (NOTE: order matters! (category comes first))
-            strXml += `<c:axId val="${catAxisId}"/><c:axId val="${valAxisId}"/><c:axId val="${AXIS_ID_SERIES_PRIMARY}"/>`;
+            strXml += `<c:axId val="${catAxisId}"/><c:axId val="${valAxisId}"/>`;
+            if (chartType === CHART_TYPE.BAR3D) {
+                strXml += `<c:axId val="${AXIS_ID_SERIES_PRIMARY}"/>`;
+            }
             // 6: Close Chart tag
             strXml += `</c:${chartType}Chart>`;
             // end switch
@@ -5051,6 +5069,77 @@ function getSizeFromImage (inImgUrl: string): { width: number, height: number } 
 /**
  * PptxGenJS: XML Generation
  */
+/**
+ * Calculate font scale for text shrink-to-fit functionality
+ * PowerPoint requires explicit fontScale value for immediate shrinking
+ * @param {ISlideObject} slideObject - slide object with text and dimensions
+ * @return {number} fontScale value (percentage * 1000, e.g., 85000 = 85%)
+ */
+function calculateFontScale(slideObject) {
+    var _a, _b, _c;
+    // Get text content and font size
+    let textContent = '';
+    let fontSize = 18; // PowerPoint default font size in points
+    if (Array.isArray(slideObject.text)) {
+        slideObject.text.forEach(textItem => {
+            var _a;
+            if (typeof textItem === 'string') {
+                textContent += textItem;
+            }
+            else if (textItem.text) {
+                textContent += textItem.text;
+                if ((_a = textItem.options) === null || _a === void 0 ? void 0 : _a.fontSize) {
+                    fontSize = textItem.options.fontSize;
+                }
+            }
+        });
+    }
+    else if (typeof slideObject.text === 'string') {
+        textContent = slideObject.text;
+    }
+    // Get font size from main options if set
+    if ((_a = slideObject.options) === null || _a === void 0 ? void 0 : _a.fontSize) {
+        fontSize = slideObject.options.fontSize;
+    }
+    // Get box dimensions in EMU (slideObject dimensions are already in EMU after processing)
+    // Note: w and h could be in inches (number) or percentage (string)
+    const boxWidth = typeof ((_b = slideObject.options) === null || _b === void 0 ? void 0 : _b.w) === 'number' ? slideObject.options.w : 0;
+    const boxHeight = typeof ((_c = slideObject.options) === null || _c === void 0 ? void 0 : _c.h) === 'number' ? slideObject.options.h : 0;
+    // If we don't have enough info, return a reasonable default (75%)
+    if (!textContent || boxWidth === 0 || boxHeight === 0) {
+        return 75000;
+    }
+    // Convert to points if dimensions are in inches (1 inch = 72 points)
+    // Note: At this point, w/h are still in inches before EMU conversion
+    const boxWidthPts = boxWidth * 72;
+    const boxHeightPts = boxHeight * 72;
+    // Account for default margins (~0.1 inch on each side = ~7pt each)
+    const marginPts = 14; // ~7pt * 2 sides
+    const usableWidth = Math.max(boxWidthPts - marginPts, 10);
+    const usableHeight = Math.max(boxHeightPts - marginPts, 10);
+    // Estimate text dimensions
+    // Average character width is roughly 0.5-0.6 of font size for most fonts
+    const avgCharWidth = fontSize * 0.55;
+    const lineHeight = fontSize * 1.2; // Typical line height is 120% of font size
+    // Calculate how many characters fit per line
+    const charsPerLine = Math.max(Math.floor(usableWidth / avgCharWidth), 1);
+    // Calculate lines needed (accounting for word wrap)
+    const totalChars = textContent.length;
+    const linesNeeded = Math.ceil(totalChars / charsPerLine);
+    // Calculate height needed for all lines
+    const heightNeeded = linesNeeded * lineHeight;
+    // If text fits, use a moderate scale to still trigger shrink mode
+    if (heightNeeded <= usableHeight) {
+        return 95000; // 95% - text fits but we set slightly less to enable shrink mode
+    }
+    // Calculate scale needed to fit
+    const scaleFactor = usableHeight / heightNeeded;
+    // Convert to OOXML format (percentage * 1000) and clamp between 25% and 100%
+    // We use Math.sqrt to be less aggressive (text width also shrinks when font shrinks)
+    const adjustedScale = Math.sqrt(scaleFactor);
+    const fontScale = Math.max(25000, Math.min(100000, Math.round(adjustedScale * 100000)));
+    return fontScale;
+}
 const ImageSizingXml = {
     cover: function (imgSize, boxDim) {
         const imgRatio = imgSize.h / imgSize.w;
@@ -5111,7 +5200,7 @@ function slideObjectToXml(slide) {
     strSlideXml += '<a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>';
     // STEP 3: Loop over all Slide.data objects and add them to this slide
     slide._slideObjects.forEach((slideItemObj, idx) => {
-        var _a, _b, _c, _d, _e, _f, _g, _h;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
         let x = 0;
         let y = 0;
         let cx = getSmartParseNumber('75%', 'X', slide._presLayout);
@@ -5408,7 +5497,9 @@ function slideObjectToXml(slide) {
                 }
                 // </Hyperlink>
                 strSlideXml += '</p:cNvPr>';
-                strSlideXml += '<p:cNvSpPr' + (((_e = slideItemObj.options) === null || _e === void 0 ? void 0 : _e.isTextBox) ? ' txBox="1"/>' : '/>');
+                // NOTE: txBox="1" indicates this is a text box, which helps PowerPoint apply text-specific features
+                const needsTxBox = ((_e = slideItemObj.options) === null || _e === void 0 ? void 0 : _e.isTextBox) || ((_f = slideItemObj.options) === null || _f === void 0 ? void 0 : _f.fit) === 'shrink' || ((_g = slideItemObj.options) === null || _g === void 0 ? void 0 : _g.shrinkText);
+                strSlideXml += '<p:cNvSpPr' + (needsTxBox ? ' txBox="1"/>' : '/>');
                 strSlideXml += `<p:nvPr>${slideItemObj._type === 'placeholder' ? genXmlPlaceholder(slideItemObj) : genXmlPlaceholder(placeholderObj)}</p:nvPr>`;
                 strSlideXml += '</p:nvSpPr><p:spPr>';
                 strSlideXml += `<a:xfrm${locationAttr}>`;
@@ -5424,7 +5515,7 @@ function slideObjectToXml(slide) {
                     strSlideXml += '<a:rect l="l" t="t" r="r" b="b" />';
                     strSlideXml += '<a:pathLst>';
                     strSlideXml += `<a:path w="${cx}" h="${cy}">`;
-                    (_f = slideItemObj.options.points) === null || _f === void 0 ? void 0 : _f.forEach((point, i) => {
+                    (_h = slideItemObj.options.points) === null || _h === void 0 ? void 0 : _h.forEach((point, i) => {
                         if ('curve' in point) {
                             switch (point.curve.type) {
                                 case 'arc':
@@ -5527,10 +5618,10 @@ function slideObjectToXml(slide) {
                 strSlideXml += '<p:pic>';
                 strSlideXml += '  <p:nvPicPr>';
                 strSlideXml += `<p:cNvPr id="${idx + 2}" name="${slideItemObj.options.objectName}" descr="${encodeXmlEntities(slideItemObj.options.altText || slideItemObj.image)}">`;
-                if ((_g = slideItemObj.hyperlink) === null || _g === void 0 ? void 0 : _g.url) {
+                if ((_j = slideItemObj.hyperlink) === null || _j === void 0 ? void 0 : _j.url) {
                     strSlideXml += `<a:hlinkClick r:id="rId${slideItemObj.hyperlink._rId}" tooltip="${slideItemObj.hyperlink.tooltip ? encodeXmlEntities(slideItemObj.hyperlink.tooltip) : ''}"/>`;
                 }
-                if ((_h = slideItemObj.hyperlink) === null || _h === void 0 ? void 0 : _h.slide) {
+                if ((_k = slideItemObj.hyperlink) === null || _k === void 0 ? void 0 : _k.slide) {
                     strSlideXml += `<a:hlinkClick r:id="rId${slideItemObj.hyperlink._rId}" tooltip="${slideItemObj.hyperlink.tooltip ? encodeXmlEntities(slideItemObj.hyperlink.tooltip) : ''}" action="ppaction://hlinksldjump"/>`;
                 }
                 strSlideXml += '    </p:cNvPr>';
@@ -6033,7 +6124,9 @@ function genXmlBodyProperties(slideObject) {
     if (slideObject && slideObject._type === SLIDE_OBJECT_TYPES.text && slideObject.options._bodyProp) {
         // PPT-2019 EX: <a:bodyPr wrap="square" lIns="1270" tIns="1270" rIns="1270" bIns="1270" rtlCol="0" anchor="ctr"/>
         // A: Enable or disable textwrapping none or square
-        bodyProperties += slideObject.options._bodyProp.wrap ? ' wrap="square"' : ' wrap="none"';
+        // NOTE: wrap="square" is REQUIRED for normAutofit (shrink) to work
+        const needsWrapSquare = slideObject.options.fit === 'shrink' || slideObject.options.shrinkText;
+        bodyProperties += (slideObject.options._bodyProp.wrap || needsWrapSquare) ? ' wrap="square"' : ' wrap="none"';
         // B: Textbox margins [padding]
         if (slideObject.options._bodyProp.lIns || slideObject.options._bodyProp.lIns === 0)
             bodyProperties += ` lIns="${slideObject.options._bodyProp.lIns}"`;
@@ -6061,17 +6154,22 @@ function genXmlBodyProperties(slideObject) {
             // NOTE: Use of '<a:noAutofit/>' instead of '' causes issues in PPT-2013!
             if (slideObject.options.fit === 'none')
                 bodyProperties += '';
-            // NOTE: Shrink does not work automatically - PowerPoint calculates the `fontScale` value dynamically upon resize
-            // else if (slideObject.options.fit === 'shrink') bodyProperties += '<a:normAutofit fontScale="85000" lnSpcReduction="20000"/>' // MS-PPT > Format shape > Text Options: "Shrink text on overflow"
-            else if (slideObject.options.fit === 'shrink')
-                bodyProperties += '<a:normAutofit/>';
+            else if (slideObject.options.fit === 'shrink') {
+                // PowerPoint requires explicit fontScale for immediate shrinking (without user interaction)
+                // Without fontScale, PowerPoint defaults to 100% (no shrink) until user edits the shape
+                const fontScale = calculateFontScale(slideObject);
+                const lnSpcReduction = 10000; // 10% line spacing reduction
+                bodyProperties += `<a:normAutofit fontScale="${fontScale}" lnSpcReduction="${lnSpcReduction}"/>`;
+            }
             else if (slideObject.options.fit === 'resize')
                 bodyProperties += '<a:spAutoFit/>';
         }
         //
         // DEPRECATED: below (@deprecated v3.3.0)
-        if (slideObject.options.shrinkText)
-            bodyProperties += '<a:normAutofit/>'; // MS-PPT > Format shape > Text Options: "Shrink text on overflow"
+        if (slideObject.options.shrinkText) {
+            const fontScale = calculateFontScale(slideObject);
+            bodyProperties += `<a:normAutofit fontScale="${fontScale}" lnSpcReduction="10000"/>`;
+        }
         /* DEPRECATED: below (@deprecated v3.3.0)
          * MS-PPT > Format shape > Text Options: "Resize shape to fit text" [spAutoFit]
          * NOTE: Use of '<a:noAutofit/>' in lieu of '' below causes issues in PPT-2013
